@@ -85,7 +85,6 @@ class Button:
         x2 = x1 + self.rect[2] - 1
         y2 = y1 + self.rect[3] - 1
         if ((pos[0] >= x1) and (pos[0] <= x2) and (pos[1] >= y1) and (pos[1] <= y2)):
-            sound('sound_click', 1.0)
             if self.callback:
                 if self.value is None:
                     self.callback(self)
