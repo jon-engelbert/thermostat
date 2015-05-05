@@ -26,10 +26,10 @@ import calendar
 
 DEBUG = True
 
-iconPath        = 'icons' # Subdirectory containing UI bitmaps (PNG format)
-icons = [] # This list gets populated at startup
-screenMode      =  0      # Current screen mode; default = viewfinder
-screenModePrior = -1      # Prior screen mode (for detecting changes)
+iconPath = 'icons'
+icons = []
+screenMode = "main"
+screenModePrior = "none"
 
 current_temp = 72.0;
 
@@ -126,22 +126,70 @@ class Button:
                     self.iconBg = i
                     break
 
+class Panel:
+    
+    buttons = [];
+    
+    def __init__(self, name, isstatic, draw_func, buttons):
+        self.name = name
+        self.isstatic = isstatic
+        self.draw_func = draw_func
+        self.buttons = buttons
+
+    def draw(self, screen):
+        # Overlay buttons on display and update
+        for i,b in enumerate(self.buttons):
+            b.draw(screen)
+        if self.draw_func:
+            self.draw_func(self)
+
 ###############################################################################################################
 
-def screen_00_callback(button, n): # normal display
+def screen_main_cb(button, n): # normal display
     global screenMode
     global v
     
     if n == 1:   # config
-        screenMode = 1
+        screenMode = "main"
+    else:
+        screenMode = "duh" # nothing else yet
+
+def screen_main_draw(panel): # normal display
+    global screenMode
+    global v
+    
+    fontsugsz0 = 12
+    
+    z = "{0:2.1f}".format(get_display_temp())
+    try:
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[v['FontIndex']], fontsugsz0)
+    except IndexError:
+        v['FontIndex'] = 1
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[0], fontsugsz0)
+
+def screen_duh_draw(panel): # normal display
+    global screenMode
+    global v
+    
+    fontsugsz0 = 12
+    
+    z = get_display_time(datetime.datetime.now())
+    try:
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[v['FontIndex']], fontsugsz0)
+    except IndexError:
+        v['FontIndex'] = 1
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[0], fontsugsz0)
 
 ###############################################################################################################
 
-buttons = [
-    # Screen mode 0 is main view screen of the thermostat
-    [Button((0,  0, 320,  60), bg='box', cb=screen_00_callback, value=1),
-    Button((0, 60, 320, 180), bg='box', cb=screen_00_callback, value=2)]
-]
+panels = {
+    "main": Panel("main", False, screen_main_draw, 
+        [Button((0,  0, 320,  60), bg='box', color=(48,48,48), cb=screen_main_cb, value=1),
+        Button((0, 60, 320, 180), bg='box', color=(32,32,32), cb=screen_main_cb, value=2)]),
+    "duh": Panel("duh", False, screen_duh_draw, 
+        [Button((0,  0, 320,  60), bg='box', color=(48,48,48), cb=screen_main_cb, value=1),
+        Button((0, 60, 320, 180), bg='box', color=(32,32,32), cb=screen_main_cb, value=2)])
+}
 
 ###############################################################################################################
 # Assorted utility functions -----------------------------------------------
@@ -186,11 +234,29 @@ def read_persistent_vars():
     config_last_read = datetime.datetime.now()
 
 def get_display_temp():
+    global v
+    global current_temp
+    
     if v.get('temperature_in_F', True): # Fahrenheit
         current_temp = si705X.get_tempF()
     else: # Centigrade
         current_temp = si705X.get_tempC()
     return current_temp
+
+def get_display_time(when):
+    global v
+
+    hour = when.hour
+    if not v.get('mode-24hour', False): # 12-hour AM/PM mode
+        hour = hour if hour <= 12 else hour - 12
+        hour = hour if hour > 0 else 12
+        if v.get('leading-zero', False): # leading zero?
+            z = "{0:02}:{1:02}".format(hour, when.minute)
+        else:
+            z = "{0}:{1:02}".format(hour, when.minute)
+    else: # 24-hour mode
+        z = "{0:02}:{1:02}".format(hour, when.minute)
+    return z
 
 def centerMaxText(surface, text, color, rectTP, fontname, fontsizesuggestion, coast=True, aa=True, bkg=None):
     global lastfont
@@ -277,22 +343,23 @@ if __name__ == '__main__':
     allfonts = pygame.font.get_fonts()
     
     log_info("Loading Icons...")
+
     # Load all icons at startup.
     for file in os.listdir(iconPath):
         if fnmatch.fnmatch(file, '*.png'):
             icons.append(Icon(file.split('.')[0]))
+
     # Assign Icons to Buttons, now that they're loaded
-    
     log_info("Assigning Buttons")
-    for s in buttons:        # For each screenful of buttons...
-        for b in s:            #  For each button on screen...
-            for i in icons:      #   For each icon...
-                if b.bg == i.name: #    Compare names; match?
-                    b.iconBg = i     #     Assign Icon to Button
-                    b.bg     = None  #     Name no longer used; allow garbage collection
+    for p in panels.values():
+        for b in p.buttons:
+            for i in icons:
+                if b.bg == i.name:
+                    b.iconBg = i # Assign Icon to Button
+                    b.bg = None # Name no longer used; allow garbage collection
                 if b.fg == i.name:
                     b.iconFg = i
-                    b.fg     = None
+                    b.fg = None
     
     # Set up GPIO pins
     log_info("Initializing GPIO pins...")
@@ -352,39 +419,24 @@ if __name__ == '__main__':
                 for event in pygame.event.get():
                     if (event.type is MOUSEBUTTONDOWN):
                         pos = pygame.mouse.get_pos()
-                        for b in buttons[screenMode]:
+                        for b in panels[screenMode].buttons:
                             if b.selected(pos):
                                 break
                     elif (event.type is MOUSEBUTTONUP):
                         pass
-                if screenMode >= 0 or screenMode != screenModePrior:
+                if not panels[screenMode].isstatic or screenMode != screenModePrior:
                     break
                 time.sleep(0.01)
             
             fgcolor = (255,255,255)
             bgcolor = (0,0,0)
-            
-            #if img is None or img.get_height() < 240: # Letterbox, clear background
-            #    screen.fill(0)
-            #if img:
-            #    screen.blit(img, ((320 - img.get_width() ) / 2, (240 - img.get_height()) / 2))
             screen.fill(bgcolor)
 
 ###############################################################################################################
-                
-            if screenMode == 0:
-                z = "{0:2.1f}".format(get_display_temp())
-                try:
-                    fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[v['FontIndex']], fontsugsz0)
-                except IndexError:
-                    v['FontIndex'] = 1
-                    fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[0], fontsugsz0)
+
+            panels[screenMode].draw(screen)
 
 ###############################################################################################################
-
-            # Overlay buttons on display and update
-            for i,b in enumerate(buttons[screenMode]):
-                b.draw(screen)
 
             pygame.display.flip()
             time.sleep(0.01)
