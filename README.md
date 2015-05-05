@@ -1,4 +1,4 @@
-# thermostat
+# thermostat (raspistat?)
 
 This is a Raspberry Pi based thermostat.  The word "hat" as applied to a Raspberry Pi
 includes an EEPROM with the proper device-tree overlay and driver code on it.  Since
