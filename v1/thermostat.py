@@ -21,6 +21,7 @@ import datetime
 import syslog
 import threading
 import calendar
+from itertools import izip, count
 
 # Globals
 
@@ -30,29 +31,64 @@ iconPath = 'icons'
 icons = []
 screenMode = "main"
 screenModePrior = "none"
-
-current_temp = 72.0;
+fgcolor = (0,0,0)
+bgcolor = (0,0,0)
+    
+display_temp = "72.0"
+last_temp_fetch = datetime.datetime.now() - datetime.timedelta(1)
+rolling_temp_values = []
+current_temp = 72.0
 
 lastfont = None
 lastfontname = ''
 lastfontsize = 16
 
-relays = {
-    "W1": { "gpio": 17, "pin": 11 },
-    "W2": { "gpio": 15, "pin": 10 },
-    "W3": { "gpio": 14, "pin":  8 },
-    "G" : { "gpio": 18, "pin": 12 },
-    "Y1": { "gpio": 27, "pin": 13 },
-    "Y2": { "gpio": 22, "pin": 15 }
-}
-
 v = {
-       "bright_threshold": 60, 
-       "mode-24hour": False, 
-       "FontIndex": 51, 
-       "leading-zero": False,
-       "temperature_in_F": True
+    "mode-24hour": False,
+    "sensor_compensation": -18.0,
+    "FontIndex": 0, 
+    "leading-zero": False,
+    "temperature_in_F": True,
+    "number_of_temps_to_avg": 60,
+    "minimum_target_temp": 10.0,
+    "maximum_target_temp": 110.0,
+    "target_temp": 72.0,
+    "target_increment": 0.5,
+    "heat1_on_hysteresis": 2.5,
+    "heat1_off_hysteresis": 2.5,
+    "heat2_on_hysteresis": 2.5,
+    "heat2_off_hysteresis": 2.5,
+    "heat3_on_hysteresis": 2.5,
+    "heat3_off_hysteresis": 2.5,
+    "cool1_on_hysteresis": 2.5,
+    "cool1_off_hysteresis": 2.5,
+    "cool2_on_hysteresis": 2.5,
+    "cool2_off_hysteresis": 2.5,
+    "minimum_cool1_on_secs": 240,
+    "minimum_cool2_on_secs": 240,
+    "minimum_cool1_off_secs": 240,
+    "minimum_cool2_off_secs": 240,
+    "minimum_heat1_on_secs": 120,
+    "minimum_heat2_on_secs": 120,
+    "minimum_heat3_on_secs": 120,
+    "minimum_heat1_off_secs": 120,
+    "minimum_heat2_off_secs": 120,
+    "minimum_heat3_off_secs": 120,
+    "relays": {
+        "W1": { "gpio": 17, "pin": 11, "active": False, "do-not-use": False,
+            "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) },
+        "W2": { "gpio": 15, "pin": 10, "active": False, "do-not-use": False,
+            "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) },
+        "W3": { "gpio": 14, "pin":  8, "active": False, "do-not-use": False,
+            "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) },
+        "G" : { "gpio": 18, "pin": 12, "active": False, "do-not-use": False,
+            "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) },
+        "Y1": { "gpio": 27, "pin": 13, "active": False, "do-not-use": False,
+               "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) },
+        "Y2": { "gpio": 22, "pin": 15, "active": False, "do-not-use": False,
+               "last-on": datetime.datetime.now() - datetime.timedelta(1), "last-off": datetime.datetime.now() - datetime.timedelta(1) }
     }
+}
 
 class Icon:
     def __init__(self, name):
@@ -149,23 +185,52 @@ def screen_main_cb(button, n): # normal display
     global screenMode
     global v
     
-    if n == 1:   # config
+    if n == 2: # up
+        v['target_temp'] = v.get('target_temp', 72.0) + v.get('target_increment', 0.5)
+        if v['target_temp'] > v.get("maximum_target_temp", 110.0):
+            v['target_temp'] = v.get("minimum_target_temp", 110.0)
+    elif n == 3:
+        v['target_temp'] = v.get('target_temp', 72.0) - v.get('target_increment', 0.5)
+        if v['target_temp'] < v.get("minimum_target_temp", 0.0):
+            v['target_temp'] = v.get("minimum_target_temp", 0.0)
+    elif n == 4:
+        screenMode = "empty"
+    elif n == 5:
+        screenMode = "duh"
+
+def screen_duh_cb(button, n): # normal display
+    global screenMode
+    global v
+    
+    if n == 2:
         screenMode = "main"
-    else:
-        screenMode = "duh" # nothing else yet
+    elif n == 3:
+        screenMode = "empty"
+
+def screen_empty_cb(button, n): # normal display
+    global screenMode
+    global v
+    
+    if n == 2:
+        screenMode = "duh"
+    elif n == 3:
+        screenMode = "main"
 
 def screen_main_draw(panel): # normal display
     global screenMode
     global v
     
-    fontsugsz0 = 12
-    
-    z = "{0:2.1f}".format(get_display_temp())
-    try:
-        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[v['FontIndex']], fontsugsz0)
-    except IndexError:
-        v['FontIndex'] = 1
-        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[0], fontsugsz0)
+    when = datetime.datetime.now()
+
+    z = "{0:3.1f}".format(v.get('target_temp', 72.0))
+    v['fontsize_main_0'] = centerMaxText(screen, z, fgcolor, (50, 20, 160, 120), allfonts[v['FontIndex']], v.get('fontsize_main_0', 82))
+    #if DEBUG:
+    #    centerMaxText(screen, str(v['fontsize_main_0']), (0,0,255), (50, 20, 160, 120), allfonts[0], v['fontsize_main_0'])
+
+    z = "currently {0} {1}".format(get_display_temp(when), "F" if v.get('temperature_in_F', True) else "C")
+    v['fontsize_main_1'] = centerMaxText(screen, z, fgcolor, (50, 145, 160, 35), allfonts[v['FontIndex']], v.get('fontsize_main_1', 28))
+    #if DEBUG:
+    #    centerMaxText(screen, str(v['fontsize_main_1']), (0,0,255), (50, 145, 160, 35), allfonts[0], v['fontsize_main_1'])
 
 def screen_duh_draw(panel): # normal display
     global screenMode
@@ -175,20 +240,29 @@ def screen_duh_draw(panel): # normal display
     
     z = get_display_time(datetime.datetime.now())
     try:
-        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[v['FontIndex']], fontsugsz0)
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (20, 30, 280, 160), allfonts[v['FontIndex']], fontsugsz0)
     except IndexError:
         v['FontIndex'] = 1
-        fontsugsz0 = centerMaxText(screen, z, fgcolor, (0, 70, 320, 160), allfonts[0], fontsugsz0)
+        fontsugsz0 = centerMaxText(screen, z, fgcolor, (20, 30, 280, 160), allfonts[0], fontsugsz0)
 
 ###############################################################################################################
 
 panels = {
     "main": Panel("main", False, screen_main_draw, 
-        [Button((0,  0, 320,  60), bg='box', color=(48,48,48), cb=screen_main_cb, value=1),
-        Button((0, 60, 320, 180), bg='box', color=(32,32,32), cb=screen_main_cb, value=2)]),
+        [Button((0,  0, 320, 240), bg='box', color=(0,0,0), cb=screen_main_cb, value=1),
+        Button((50, 20, 160, 120), color=(20,20,20)),
+        Button((230, 20, 60, 60), bg='up', cb=screen_main_cb, value=2),
+        Button((230, 90, 60, 60), bg='down', cb=screen_main_cb, value=3),
+        Button((0, 180, 60, 60), bg='left', cb=screen_main_cb, value=4),
+        Button((260, 180, 60, 60), bg='right', cb=screen_main_cb, value=5)]),
     "duh": Panel("duh", False, screen_duh_draw, 
-        [Button((0,  0, 320,  60), bg='box', color=(48,48,48), cb=screen_main_cb, value=1),
-        Button((0, 60, 320, 180), bg='box', color=(32,32,32), cb=screen_main_cb, value=2)])
+        [Button((0,  0, 320, 240), bg='box', color=(80,0,80), cb=screen_duh_cb, value=1),
+        Button((0, 180, 60, 60), bg='left', cb=screen_duh_cb, value=2),
+        Button((260, 180, 60, 60), bg='right', cb=screen_duh_cb, value=3)]),
+    "empty": Panel("empty", False, None, 
+        [Button((0,  0, 320, 240), bg='box', color=(0,0,0), cb=screen_empty_cb, value=1),
+        Button((0, 180, 60, 60), bg='left', cb=screen_empty_cb, value=2),
+        Button((260, 180, 60, 60), bg='right', cb=screen_empty_cb, value=3)]),
 }
 
 ###############################################################################################################
@@ -204,6 +278,7 @@ def log_error(msg):
     if DEBUG: print msg
 
 def killitwithfire(n, stack):
+    write_persistent_vars()
     if n == signal.SIGINT:    
         log_info("SIGNAL: Program halted with ^C")
     elif n == signal.SIGTERM:
@@ -217,8 +292,10 @@ def handle_sighup(n, stack):
     read_persistent_vars()
 
 def write_persistent_vars():
+    global v
+
     with open('/etc/{0}.conf'.format(os.path.splitext(os.path.basename(__file__))[0]), 'w') as output:
-        json.dump(v, output, indent=3)
+        json.dump(v, output, indent=3, default=outputJSON)
         output.flush()
         output.close()
 
@@ -228,20 +305,72 @@ def read_persistent_vars():
     
     try:
         with codecs.open('/etc/{0}.conf'.format(os.path.splitext(os.path.basename(__file__))[0]), 'r', encoding='utf-8') as duhput:
-            v = json.load(duhput)
+            v = json.load(duhput, object_hook=inputJSON)
     except IOError:
         write_persistent_vars()
     config_last_read = datetime.datetime.now()
 
-def get_display_temp():
+def outputJSON(obj):
+    """Default JSON serializer."""
+
+    if isinstance(obj, datetime.datetime):
+        if obj.utcoffset() is not None:
+            obj = obj - obj.utcoffset()
+
+        return obj.strftime('%Y-%m-%d %H:%M:%S.%f')
+    return str(obj)
+
+def inputJSON(obj):
+    newDic = {}
+
+    for key in obj:
+        try:
+            if float(key) == int(float(key)):
+                newKey = int(key)
+            else:
+                newKey = float(key)
+
+            newDic[newKey] = obj[key]
+            continue
+        except ValueError:
+            pass
+
+        try:
+            newDic[str(key)] = datetime.datetime.strptime(obj[key], '%Y-%m-%d %H:%M:%S.%f')
+            continue
+        except TypeError:
+            pass
+
+        newDic[str(key)] = obj[key]
+
+    return newDic
+
+def get_display_temp(when):
     global v
-    global current_temp
+    global display_temp
+    global last_temp_fetch
     
-    if v.get('temperature_in_F', True): # Fahrenheit
-        current_temp = si705X.get_tempF()
-    else: # Centigrade
-        current_temp = si705X.get_tempC()
-    return current_temp
+    if (when - last_temp_fetch) > datetime.timedelta(0, 1):
+        if v.get('temperature_in_F', True): # Fahrenheit
+            current_temp = si705X.get_tempF()
+        else: # Centigrade
+            current_temp = si705X.get_tempC()
+            
+        rolling_temp_values.append({'temp': current_temp, 'when': when})
+        last_temp_fetch = when
+        while len(rolling_temp_values) > v.get('number_of_temps_to_avg', 60):
+            del rolling_temp_values[0]
+        #log_info("Sampled: {0:3.3f} ({1})".format(current_temp, len(rolling_temp_values)))
+
+        i = 0
+        z = 0
+        for tv in rolling_temp_values:
+            z += tv["temp"]
+            i += 1
+            
+        display_temp = "{0:3.1f}".format((z/i) + v.get("sensor_compensation", 0.0))
+        
+    return display_temp
 
 def get_display_time(when):
     global v
@@ -301,6 +430,61 @@ def centerMaxText(surface, text, color, rectTP, fontname, fontsizesuggestion, co
 
     return fontsize
 
+def act_on_temp(when):
+    global v
+    global current_temp
+    global gpio
+    
+    comparable_temp = current_temp + v.get("sensor_compensation", 0.0)
+    
+    # is the environment lower/colder than our target?
+    if comparable_temp < v.get('target_temp', 72.0):
+        # it is colder than we want it to be
+        # are any cool stages on?
+        if v["relays"]["Y1"]["active"] or v["relays"]["Y2"]["active"]:
+            # We should turn off the cool!
+            # Has it been on long enough?
+            if v["relays"]["Y2"]["active"] \
+                    and (when - v["relays"]["Y2"]["last-on"]) > v.get("minimum_cool2_on_secs", 240) \
+                    and (v['target_temp'] - comparable_temp) < v.get('cool2_off_hysteresis', 2.5):
+                # it's cold and stage 2 cooling is on, so turn it off
+                gpio.digitalWrite(v["relays"]["Y2"]["gpio"], 0)
+                v["relays"]["Y2"]["last-off"] = when;
+                v["relays"]["Y2"]["active"] = False;
+            if v["relays"]["Y1"]["active"] \
+                    and (when - v["relays"]["Y1"]["last-on"]) > v.get("minimum_cool1_on_secs", 240) \
+                    and (v['target_temp'] - comparable_temp) > v.get('cool1_off_hysteresis', 2.5):
+                # it's cold and stage 1 cooling is on, so turn it off
+                gpio.digitalWrite(v["relays"]["Y1"]["gpio"], 0)
+                v["relays"]["Y1"]["last-off"] = when;
+                v["relays"]["Y1"]["active"] = False;
+        # are any heat stages off?
+        if (not v["relays"]["W1"]["active"] and not v["relays"]["W1"]["not-in-use"]) \
+            or (not v["relays"]["W2"]["active"] and not v["relays"]["W2"]["not-in-use"]) \
+            or (not v["relays"]["W3"]["active"] and not v["relays"]["W3"]["not-in-use"]):
+            # We should turn on the heat!
+            # Has it been off long enough?
+            if not v["relays"]["W1"]["active"] and (when - v["relays"]["W1"]["last-off"]) > v.get("minimum_heat1_off_secs", 120) \
+                    and (v['target_temp'] - comparable_temp) > v.get('heat1_on_hysteresis', 2.5):
+                # it's cold and stage 1 heating is off, so turn it on
+                v["relays"]["W1"]["active"] = True;
+                v["relays"]["W1"]["last-on"] = when;
+                gpio.digitalWrite(v["relays"]["W1"]["gpio"], 1)
+            if not v["relays"]["W2"]["active"] and (when - v["relays"]["W2"]["last-off"]) > v.get("minimum_heat2_off_secs", 120) \
+                    and (v['target_temp'] - comparable_temp) > v.get('heat2_on_hysteresis', 2.5):
+                # it's cold and stage 2 heating is off, so turn it on
+                v["relays"]["W2"]["active"] = True;
+                v["relays"]["W2"]["last-on"] = when;
+                gpio.digitalWrite(v["relays"]["W2"]["gpio"], 1)
+            if not v["relays"]["W3"]["active"] and (when - v["relays"]["W3"]["last-off"]) > v.get("minimum_heat3_off_secs", 120) \
+                    and (v['target_temp'] - comparable_temp) > v.get('heat3_on_hysteresis', 2.5):
+                # it's cold and stage 3 heating is off, so turn it on
+                v["relays"]["W3"]["active"] = True;
+                v["relays"]["W3"]["last-on"] = when;
+                gpio.digitalWrite(v["relays"]["W3"]["gpio"], 1)
+        
+            
+    
 ###############################################################################################################
 ###############################################################################################################
 ###############################################################################################################
@@ -309,18 +493,21 @@ def centerMaxText(surface, text, color, rectTP, fontname, fontsizesuggestion, co
 if __name__ == '__main__':
 
     log_info("Hello, I am a computer.  Whir, click, beep!")
+
+    # handle PID file
     pid = str(os.getpid())
     pidfile = os.path.join("/var", "run", os.path.splitext(os.path.basename(__file__))[0]+".pid")
     
+    log_error("PID file: %s" % pidfile)
     if os.path.isfile(pidfile):
         log_error("%s already exists, exiting" % pidfile)
         sys.exit(2)
 
-    with file(pidfile, 'w') as f:
-        f.write(pid)
-        f.flush()
-        f.close()
-
+    with file(pidfile, "w") as pidf:
+        pidf.write(pid)
+        pidf.flush()
+        pidf.close()
+    
     # Initialization -----------------------------------------------------------
     log_info("Initializing...")
     read_persistent_vars()
@@ -363,11 +550,14 @@ if __name__ == '__main__':
     
     # Set up GPIO pins
     log_info("Initializing GPIO pins...")
+    when = datetime.datetime.now()
     gpio = wiringpi2.GPIO(wiringpi2.GPIO.WPI_MODE_GPIO)
-    for relay in relays.values():
+    for relay in v["relays"].values():
         gpio.pinMode(relay.get('gpio'), gpio.OUTPUT)
         gpio.pullUpDnControl(relay.get('gpio'), gpio.PUD_DOWN)
         gpio.digitalWrite(relay.get('gpio'), 0)
+        relay["active"] = False
+        relay["last-off"] = when
 
     log_info("Initializing temperature sensor...")
     si705X.startup(1, 0x40)
@@ -392,26 +582,15 @@ if __name__ == '__main__':
     signal.signal(signal.SIGQUIT, killitwithfire)
     signal.signal(signal.SIGTERM, killitwithfire)
     signal.signal(signal.SIGHUP, handle_sighup)
-    
+
 ###############################################################################################################
 # Main loop ------------------------------------------------------------------
 ###############################################################################################################
     
-    fontsugsz41 = 16
-    fontsugsz42 = 16
-    fontsugsz0 = 12
-    fontsugszA = 12
-    
-    arial50 = pygame.font.SysFont("Arial", 50)
-    font_arial_Small = pygame.font.SysFont("Arial", 24)
-    font_fixed_Small = pygame.font.SysFont("fixed", 24)
-    fgcolor = (0,0,0)
-    bgcolor = (0,0,0)
-    
-    when = datetime.datetime.now()
     go = True
     log_info("Main loop...")
     try:
+        # process current screen
         while go:
             # Process touchscreen input
             while go:
@@ -419,7 +598,8 @@ if __name__ == '__main__':
                 for event in pygame.event.get():
                     if (event.type is MOUSEBUTTONDOWN):
                         pos = pygame.mouse.get_pos()
-                        for b in panels[screenMode].buttons:
+                        for i,b in izip(count(len(panels[screenMode].buttons) - 1, -1), reversed(panels[screenMode].buttons)):
+                            #for b in panels[screenMode].buttons:
                             if b.selected(pos):
                                 break
                     elif (event.type is MOUSEBUTTONUP):
