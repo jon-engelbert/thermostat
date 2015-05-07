@@ -22,10 +22,15 @@ import syslog
 import threading
 import calendar
 from itertools import izip, count
+import math
 
 # Globals
 
 DEBUG = True
+simulation = 0.0
+simulation_period = 120.0
+simulation_flux = 20.0
+simulation_center = 70.0
 
 iconPath = 'icons'
 icons = []
@@ -164,7 +169,7 @@ class Button:
 
 class Panel:
     
-    buttons = [];
+    buttons = []
     
     def __init__(self, name, isstatic, draw_func, buttons):
         self.name = name
@@ -349,12 +354,20 @@ def get_display_temp(when):
     global v
     global display_temp
     global last_temp_fetch
+    global simulation
+    global current_temp
     
     if (when - last_temp_fetch) > datetime.timedelta(0, 1):
-        if v.get('temperature_in_F', True): # Fahrenheit
-            current_temp = si705X.get_tempF()
-        else: # Centigrade
-            current_temp = si705X.get_tempC()
+        if simulation >= 0.0:
+            simulation += (360.0 / simulation_period)
+            if simulation >= 360.0:
+                simulation -= 360.0
+            current_temp = simulation_center + (simulation_flux * math.sin(math.radians(simulation))) # - v.get("sensor_compensation", 0.0)
+        else:
+            if v.get('temperature_in_F', True): # Fahrenheit
+                current_temp = si705X.get_tempF()
+            else: # Centigrade
+                current_temp = si705X.get_tempC()
             
         rolling_temp_values.append({'temp': current_temp, 'when': when})
         last_temp_fetch = when
@@ -436,54 +449,108 @@ def act_on_temp(when):
     global gpio
     
     comparable_temp = current_temp + v.get("sensor_compensation", 0.0)
+    #log_info("target: {0:3.1f}, temp: {1:3.1f}, diff: {2:3.1f}".format(v['target_temp'], comparable_temp, comparable_temp - v['target_temp']))
     
     # is the environment lower/colder than our target?
     if comparable_temp < v.get('target_temp', 72.0):
-        # it is colder than we want it to be
+        #log_info("It is colder than we want it to be")
         # are any cool stages on?
         if v["relays"]["Y1"]["active"] or v["relays"]["Y2"]["active"]:
-            # We should turn off the cool!
+            #log_info("We should turn off the cool!")
             # Has it been on long enough?
             if v["relays"]["Y2"]["active"] \
-                    and (when - v["relays"]["Y2"]["last-on"]) > v.get("minimum_cool2_on_secs", 240) \
-                    and (v['target_temp'] - comparable_temp) < v.get('cool2_off_hysteresis', 2.5):
-                # it's cold and stage 2 cooling is on, so turn it off
+                    and (when - v["relays"]["Y2"]["last-on"]) > datetime.timedelta(0, v.get("minimum_cool2_on_secs", 240)) \
+                    and (v['target_temp'] - comparable_temp) > v.get('cool2_off_hysteresis', 2.5):
+                log_info("It's cold (target: {0:3.1f}, now: {1:3.1f}) and stage 2 cooling is on, so turning it off".format(v['target_temp'], comparable_temp))
                 gpio.digitalWrite(v["relays"]["Y2"]["gpio"], 0)
-                v["relays"]["Y2"]["last-off"] = when;
-                v["relays"]["Y2"]["active"] = False;
+                v["relays"]["Y2"]["last-off"] = when
+                v["relays"]["Y2"]["active"] = False
             if v["relays"]["Y1"]["active"] \
-                    and (when - v["relays"]["Y1"]["last-on"]) > v.get("minimum_cool1_on_secs", 240) \
-                    and (v['target_temp'] - comparable_temp) > v.get('cool1_off_hysteresis', 2.5):
-                # it's cold and stage 1 cooling is on, so turn it off
+                    and (when - v["relays"]["Y1"]["last-on"]) > datetime.timedelta(0, v.get("minimum_cool1_on_secs", 240)) \
+                    and (v['target_temp'] - comparable_temp) > (v.get('cool1_off_hysteresis', 2.5) + v.get('cool2_off_hysteresis', 2.5)):
+                log_info("it's cold (target: {0:3.1f}, now: {1:3.1f}) and stage 1 cooling is on, so turning it off".format(v['target_temp'], comparable_temp))
                 gpio.digitalWrite(v["relays"]["Y1"]["gpio"], 0)
-                v["relays"]["Y1"]["last-off"] = when;
-                v["relays"]["Y1"]["active"] = False;
+                v["relays"]["Y1"]["last-off"] = when
+                v["relays"]["Y1"]["active"] = False
         # are any heat stages off?
-        if (not v["relays"]["W1"]["active"] and not v["relays"]["W1"]["not-in-use"]) \
-            or (not v["relays"]["W2"]["active"] and not v["relays"]["W2"]["not-in-use"]) \
-            or (not v["relays"]["W3"]["active"] and not v["relays"]["W3"]["not-in-use"]):
-            # We should turn on the heat!
+        if (not v["relays"]["W1"]["active"] and not v["relays"]["W1"]["do-not-use"]) \
+            or (not v["relays"]["W2"]["active"] and not v["relays"]["W2"]["do-not-use"]) \
+            or (not v["relays"]["W3"]["active"] and not v["relays"]["W3"]["do-not-use"]):
+            #log_info("We should turn on the heat!")
             # Has it been off long enough?
-            if not v["relays"]["W1"]["active"] and (when - v["relays"]["W1"]["last-off"]) > v.get("minimum_heat1_off_secs", 120) \
+            if not v["relays"]["W1"]["active"] \
+                    and not v["relays"]["W1"]["do-not-use"] \
+                    and (when - v["relays"]["W1"]["last-off"]) > datetime.timedelta(0, v.get("minimum_heat1_off_secs", 120)) \
                     and (v['target_temp'] - comparable_temp) > v.get('heat1_on_hysteresis', 2.5):
-                # it's cold and stage 1 heating is off, so turn it on
-                v["relays"]["W1"]["active"] = True;
-                v["relays"]["W1"]["last-on"] = when;
+                log_info("it's cold (target: {0:3.1f}, now: {1:3.1f}) and stage 1 heating is off, so turning it on".format(v['target_temp'], comparable_temp))
+                v["relays"]["W1"]["active"] = True
+                v["relays"]["W1"]["last-on"] = when
                 gpio.digitalWrite(v["relays"]["W1"]["gpio"], 1)
-            if not v["relays"]["W2"]["active"] and (when - v["relays"]["W2"]["last-off"]) > v.get("minimum_heat2_off_secs", 120) \
-                    and (v['target_temp'] - comparable_temp) > v.get('heat2_on_hysteresis', 2.5):
-                # it's cold and stage 2 heating is off, so turn it on
-                v["relays"]["W2"]["active"] = True;
-                v["relays"]["W2"]["last-on"] = when;
+            if not v["relays"]["W2"]["active"] \
+                    and not v["relays"]["W2"]["do-not-use"] \
+                    and (when - v["relays"]["W2"]["last-off"]) > datetime.timedelta(0, v.get("minimum_heat2_off_secs", 120)) \
+                    and (v['target_temp'] - comparable_temp) > (v.get('heat2_on_hysteresis', 2.5) + v.get('heat1_on_hysteresis', 2.5)):
+                log_info("it's cold (target: {0:3.1f}, now: {1:3.1f}) and stage 2 heating is off, so turning it on".format(v['target_temp'], comparable_temp))
+                v["relays"]["W2"]["active"] = True
+                v["relays"]["W2"]["last-on"] = when
                 gpio.digitalWrite(v["relays"]["W2"]["gpio"], 1)
-            if not v["relays"]["W3"]["active"] and (when - v["relays"]["W3"]["last-off"]) > v.get("minimum_heat3_off_secs", 120) \
-                    and (v['target_temp'] - comparable_temp) > v.get('heat3_on_hysteresis', 2.5):
-                # it's cold and stage 3 heating is off, so turn it on
-                v["relays"]["W3"]["active"] = True;
-                v["relays"]["W3"]["last-on"] = when;
+            if not v["relays"]["W3"]["active"] \
+                    and not v["relays"]["W3"]["do-not-use"] \
+                    and (when - v["relays"]["W3"]["last-off"]) > datetime.timedelta(0, v.get("minimum_heat3_off_secs", 120)) \
+                    and (v['target_temp'] - comparable_temp) > (v.get('heat3_on_hysteresis', 2.5) + v.get('heat2_on_hysteresis', 2.5) + v.get('heat1_on_hysteresis', 2.5)):
+                log_info("it's cold (target: {0:3.1f}, now: {1:3.1f}) and stage 3 heating is off, so turning it on".format(v['target_temp'], comparable_temp))
+                v["relays"]["W3"]["active"] = True
+                v["relays"]["W3"]["last-on"] = when
                 gpio.digitalWrite(v["relays"]["W3"]["gpio"], 1)
-        
-            
+    # is the environment lower/colder than our target?
+    elif comparable_temp > v.get('target_temp', 72.0):
+        #log_info("It is warmer than we want it to be")
+        # are any heat stages on?
+        if v["relays"]["W1"]["active"] or v["relays"]["W2"]["active"] or v["relays"]["W3"]["active"]:
+            #log_info("We should turn off the heat!")
+            # Has it been on long enough?
+            if v["relays"]["W3"]["active"] \
+                    and (when - v["relays"]["W3"]["last-on"]) > datetime.timedelta(0, v.get("minimum_heat3_on_secs", 240)) \
+                    and (comparable_temp - v['target_temp']) > v.get('heat3_off_hysteresis', 2.5):
+                log_info("It's hot (target: {0:3.1f}, now: {1:3.1f}) and stage 3 heating is on, so turning it off".format(v['target_temp'], comparable_temp))
+                gpio.digitalWrite(v["relays"]["W3"]["gpio"], 0)
+                v["relays"]["W3"]["last-off"] = when
+                v["relays"]["W3"]["active"] = False
+            if v["relays"]["W2"]["active"] \
+                    and (when - v["relays"]["W2"]["last-on"]) > datetime.timedelta(0, v.get("minimum_heat2_on_secs", 240)) \
+                    and (comparable_temp - v['target_temp']) > (v.get('heat2_off_hysteresis', 2.5) + v.get('heat3_off_hysteresis', 2.5)):
+                log_info("It's hot (target: {0:3.1f}, now: {1:3.1f}) and stage 2 heating is on, so turning it off".format(v['target_temp'], comparable_temp))
+                gpio.digitalWrite(v["relays"]["W2"]["gpio"], 0)
+                v["relays"]["W2"]["last-off"] = when
+                v["relays"]["W2"]["active"] = False
+            if v["relays"]["W1"]["active"] \
+                    and (when - v["relays"]["W1"]["last-on"]) > datetime.timedelta(0, v.get("minimum_heat1_on_secs", 240)) \
+                    and (comparable_temp - v['target_temp']) > (v.get('heat1_off_hysteresis', 2.5) + v.get('heat2_off_hysteresis', 2.5) + v.get('heat3_off_hysteresis', 2.5)):
+                log_info("it's hot (target: {0:3.1f}, now: {1:3.1f}) and stage 1 heating is on, so turning it off".format(v['target_temp'], comparable_temp))
+                gpio.digitalWrite(v["relays"]["W1"]["gpio"], 0)
+                v["relays"]["W1"]["last-off"] = when
+                v["relays"]["W1"]["active"] = False
+        # are any cool stages off?
+        if ((not v["relays"]["Y1"]["active"]) and (not v["relays"]["Y1"]["do-not-use"])) \
+            or ((not v["relays"]["Y2"]["active"]) and (not v["relays"]["Y2"]["do-not-use"])):
+            #log_info("We should turn on the cool!")
+            # Has it been off long enough?
+            if not v["relays"]["Y1"]["active"] \
+                    and not v["relays"]["Y1"]["do-not-use"] \
+                    and (when - v["relays"]["Y1"]["last-off"]) > datetime.timedelta(0, v.get("minimum_cool1_off_secs", 120)) \
+                    and (comparable_temp - v['target_temp']) > v.get('cool1_on_hysteresis', 2.5):
+                log_info("it's hot (target: {0:3.1f}, now: {1:3.1f}) and stage 1 cooling is off, so turning it on".format(v['target_temp'], comparable_temp))
+                v["relays"]["Y1"]["active"] = True
+                v["relays"]["Y1"]["last-on"] = when
+                gpio.digitalWrite(v["relays"]["Y1"]["gpio"], 1)
+            if not v["relays"]["Y2"]["active"] \
+                    and not v["relays"]["Y2"]["do-not-use"] \
+                    and (when - v["relays"]["Y2"]["last-off"]) > datetime.timedelta(0, v.get("minimum_cool2_off_secs", 120)) \
+                    and (comparable_temp - v['target_temp']) > (v.get('cool2_on_hysteresis', 2.5) + v.get('cool1_on_hysteresis', 2.5)):
+                log_info("it's hot (target: {0:3.1f}, now: {1:3.1f}) and stage 2 cooling is off, so turning it on".format(v['target_temp'], comparable_temp))
+                v["relays"]["Y2"]["active"] = True
+                v["relays"]["Y2"]["last-on"] = when
+                gpio.digitalWrite(v["relays"]["Y2"]["gpio"], 1)
     
 ###############################################################################################################
 ###############################################################################################################
@@ -552,12 +619,15 @@ if __name__ == '__main__':
     log_info("Initializing GPIO pins...")
     when = datetime.datetime.now()
     gpio = wiringpi2.GPIO(wiringpi2.GPIO.WPI_MODE_GPIO)
-    for relay in v["relays"].values():
+    for name,relay in v["relays"].iteritems():
         gpio.pinMode(relay.get('gpio'), gpio.OUTPUT)
-        gpio.pullUpDnControl(relay.get('gpio'), gpio.PUD_DOWN)
-        gpio.digitalWrite(relay.get('gpio'), 0)
-        relay["active"] = False
-        relay["last-off"] = when
+        gpio.pullUpDnControl(relay.get('gpio'), gpio.PUD_OFF)
+        gpio.digitalWrite(relay.get('gpio'), relay.get("active"))
+        if relay.get("active"):
+            relay["last-on"] = when
+        else:
+            relay["last-off"] = when
+        log_info("Relay {0} set to {1}".format(name, relay.get("active")))
 
     log_info("Initializing temperature sensor...")
     si705X.startup(1, 0x40)
@@ -595,6 +665,7 @@ if __name__ == '__main__':
             # Process touchscreen input
             while go:
                 when = datetime.datetime.now()
+                act_on_temp(when)
                 for event in pygame.event.get():
                     if (event.type is MOUSEBUTTONDOWN):
                         pos = pygame.mouse.get_pos()
